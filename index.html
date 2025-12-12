@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Flugbuch-Extraktor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f7f7; }
+        .table-cell-editable {
+            /* padding: 8px 4px; -- Reduziert, um die Dichte zu verringern */
+            padding: 4px 4px;
+            white-space: nowrap;
+        }
+        .table-cell-editable:focus {
+            outline: 2px solid #3b82f6; /* Blue 500 */
+            background-color: #e0f2f1; /* Teal 50 */
+        }
+        /* Sticky Header für die Tabelle */
+        #flightTable thead {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.8.0/suncalc.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <h1 class="text-3xl font-extrabold text-gray-900 mb-2">Flugbuch PDF-Extraktor</h1>
+        <p class="text-gray-600 mb-6">Wählen Sie eine oder mehrere PDF-Dateien (Flugstunden - Übersicht) aus, um Flugdaten zu extrahieren. Die Daten können in der Tabelle bearbeitet werden oder als CSV heruntergeladen werden. Optional können die PKs automatisch durch die richtigen Namen ersetzt werden, wozu ein Passwort erforderlich ist. Die CSV kann in der iOS App "Logbook" direkt importiert werden, für andere Apps kann das Format z.B. mit Excel angepasst werden.</p>
+
+        <div id="controls" class="p-5 bg-white shadow-lg rounded-xl mb-8 flex flex-col md:flex-row gap-4 items-start md:items-center">
+            <input type="file" id="pdfFile" accept=".pdf" multiple class="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 cursor-pointer w-full md:w-auto">
+
+            <input type="password" id="pksPassword" placeholder="Passwort (optional)" class="px-4 py-2 border rounded-lg text-sm w-full md:w-auto" title="Enter password to decrypt and load PKs.csv">
+
+            <button id="loadPksBtn" onclick="loadPKs()" class="px-4 py-2 bg-green-600 text-white font-semibold rounded-full shadow-md hover:bg-green-700 transition duration-150">
+                Lade PKs
+            </button>
+
+            <button id="downloadBtn" onclick="downloadCSV()" class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-full shadow-md hover:bg-blue-700 transition duration-150 disabled:bg-blue-300" disabled>
+                CSV Herunterladen
+            </button>
+
+            <button id="downloadLogBtn" onclick="downloadLog()" class="px-6 py-2 bg-gray-600 text-white font-semibold rounded-full shadow-md hover:bg-gray-700 transition duration-150">
+                Log Herunterladen
+            </button>
+        </div>
+
+        <div id="messageBox" class="hidden p-4 rounded-xl mb-6 shadow-md" role="alert"></div>
+
+        <div id="tableContainer" class="bg-white shadow-lg rounded-xl overflow-x-auto p-4 mb-6 hidden" style="max-height: 500px;">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">Extrahierte Flugdaten (Tabelle: Bearbeitbar)</h2>
+            <table id="flightTable" class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50 sticky top-0">
+                    <tr id="tableHeader"></tr>
+                </thead>
+                <tbody id="tableBody" class="divide-y divide-gray-100">
+                    </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Set the worker source for pdf.js.
+        if (typeof pdfjsLib !== 'undefined') {
+             pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js";
+        } else {
+             console.error("pdfjsLib ist nicht definiert. Bitte prüfen Sie die CDN-Verbindung.");
+        }
+
+
+        // --- 1. CONFIGURATION & EMBEDDED DATA ---
+
+        const lograw = false;
+
+        // Header for output CSV
+        const HEADER = [
+            'Date (yyyy-mm-dd)', 'Flight #', 'Aircraft', 'Aircraft Model', 'From', 'To',
+            'Departed (zulu)', 'Arrived (zulu)', 'Total (hh:mm)', 'Landings (day)',
+            'Landings (night)', 'Captain (crew)', 'Simulator', 'Remarks'
+        ];
+
+        // IATA code mapping
+        const codeDict = {
+            'TCI': 'TFS',
+            'MIL': 'MXP'
+        };
+
+        function toIATA(airportCode) {
+            return codeDict[airportCode] || airportCode;
+        }
+
+        function parsePKCSV(csvString) {
+            const map = {};
+            const lines = csvString.trim().split('\n').filter(l => l.trim());
+            lines.forEach(line => {
+                const parts = line.split(',');
+                if (parts.length >= 3) {
+                    const key = parts[0].trim();
+                    const surname = parts[1].trim();
+                    const given = parts[2].trim();
+                    if (key) map[key] = `${given} ${surname}`.trim();
+                }
+            });
+            return map;
+        }
+
+        // PKs mapping (populated from CSV upload). Kept small fallbacks.
+        let PKs = {
+            '123456A': 'Mustermann Max',
+            '789012B': 'Erika Mustermann'
+        };
+
+// Parse airport CSV data into Airports object
+function parseAirportCSV(csvString) {
+    const airports = {};
+    const lines = csvString.trim().split('\n').filter(l => l.trim());
+    lines.forEach(line => {
+        const parts = line.split(',');
+        if (parts.length >= 6) {
+            const iataCode = parts[0].trim();
+            const latitude = parseFloat(parts[3]);
+            const longitude = parseFloat(parts[4]);
+            const elevation = parseFloat(parts[5]);
+            
+            if (iataCode && !isNaN(latitude) && !isNaN(longitude) && !isNaN(elevation)) {
+                airports[iataCode] = [latitude, longitude, elevation];
+            }
+        }
+    });
+    return airports;
+}
+
+// Airports mapping (populated from CSV upload). Kept some small fallbacks.
+let Airports = {
+    'FRA': [50.033333, 8.570556, 111],
+    'TFS': [28.046111, -16.828056, 640],
+    'MXP': [45.6306, 8.7281, 234]
+};
+
+// Determine if a landing time is during night.
+// Mirrors Python logic: landingDate = arrived - 10min; then compare to dawn/dusk.
+// Uses SunCalc (no elevation support) to compute dawn and dusk for the date and location.
+function isNightLandingJS(year, month, day, arrivedTime, iataCode) {
+    try {
+        if (!arrivedTime || !iataCode) return false;
+        const airport = Airports[iataCode];
+        if (!airport) return false;
+
+        const [lat, lon] = airport;
+        const parts = arrivedTime.split(':');
+        if (parts.length < 2) return false;
+        const h = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10);
+        if (isNaN(h) || isNaN(m)) return false;
+
+        // Create a UTC-based Date for the arrival time and subtract 10 minutes
+        const landingDateUTC = new Date(Date.UTC(parseInt(year,10), parseInt(month,10) - 1, parseInt(day,10), h, m));
+        const landingCheck = new Date(landingDateUTC.getTime() - 10 * 60 * 1000);
+
+        // Compute sunrise/dawn and sunset/dusk for that date at the given coordinates
+        const times = SunCalc.getTimes(landingCheck, lat, lon);
+        const dawn = times.dawn;
+        const dusk = times.dusk;
+
+        if (!dawn || !dusk) {
+            // If times aren't available (polar regions), return false conservatively
+            return false;
+        }
+
+        return (landingCheck < dawn) || (landingCheck > dusk);
+    } catch (e) {
+        console.error('isNightLandingJS error', e);
+        return false;
+    }
+}
+
+        // --- 2. REGULAR EXPRESSIONS ---
+        
+        const rowFilter = /.*\s[A-Z]{2}\d{4}\s.*\s\d\d:\d\d-\d\d:\d\d\s[A-Z]{3}\s(?!01).*(DEFT\d{2}|DEN\d{3}|D[A-Z]{4}).*A3[2|3][0|1].*/;
+        const yearFilter = /für\sMonat.*\/.*(\d{4})/;
+        const monthFilter = /für\sMonat\s(\d\d)/;
+
+        const dayFilter = /^(\d\d)\./;
+        const flightNumberFilter = /\d\d\.\d\d\.\s([A-Z]{2}\d{4})/;
+        const simFilter = /.*(DEFT\d{2}|DEN\d{3}).*/; 
+        const registrationFilter = /.*(DEFT\d{2}|DEN\d{3}|D[A-Z]{4}).*/;
+        const modelFilter = /.*(A3[2|3][0|1]).*/;
+        const fromFilter = /.*([A-Z]{3})\s\d\d:\d\d.*/;
+        const toFilter = /.*\d\d:\d\d\s([A-Z]{3}).*/;
+        const departedFilter = /.*\s(\d\d:\d\d)-\d\d:\d\d\s.*/;
+        const arrivedFilter = /.*\s\d\d:\d\d-(\d\d:\d\d)\s.*/;
+        const landedFilter = /.*\d,\d\d\s(L)\s\d,\d\d.*/; 
+        const PKFilter = /.*\/(\d{6}[A-Z])/;
+
+
+        // --- 3. UTILITY FUNCTIONS (Unverändert) ---
+
+        function getTotal(departed, arrived) {
+            const [h0, m0] = departed.split(':').map(Number);
+            const [h1, m1] = arrived.split(':').map(Number);
+
+            let t0 = 60 * h0 + m0;
+            let t1 = 60 * h1 + m1;
+
+            // Handle overnight
+            if (t1 < t0) {
+                t1 = t1 + 24 * 60;
+            }
+
+            const d_minutes = t1 - t0;
+            const ht = Math.floor(d_minutes / 60);
+            const mt = Math.floor(d_minutes % 60);
+
+            return `${String(ht).padStart(2, '0')}:${String(mt).padStart(2, '0')}`;
+        }
+
+        function showMessage(message, type = 'info') {
+            const box = document.getElementById('messageBox');
+            box.innerText = message;
+            box.className = 'p-4 rounded-xl mb-6 shadow-md';
+            box.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700', 'bg-blue-100', 'text-blue-700');
+
+            if (type === 'error') {
+                box.classList.add('bg-red-100', 'text-red-700');
+            } else if (type === 'success') {
+                box.classList.add('bg-green-100', 'text-green-700');
+            } else {
+                box.classList.add('bg-blue-100', 'text-blue-700');
+            }
+
+            // Log the message
+            logMessages.push(`${new Date().toISOString()} [${type.toUpperCase()}]: ${message}`);
+        }
+
+
+        // --- 4. CORE PARSING LOGIC (Unverändert) ---
+
+        async function getPdfText(file) {
+            if (typeof pdfjsLib === 'undefined') {
+                throw new Error("PDF-Extraktion fehlgeschlagen: Die Bibliothek pdfjsLib konnte nicht geladen werden.");
+            }
+            const loadingTask = pdfjsLib.getDocument({ url: URL.createObjectURL(file) });
+            const pdf = await loadingTask.promise;
+            const numPages = pdf.numPages;
+            const allPagesText = [];
+
+            for (let i = 1; i <= numPages; i++) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const lines = extractLinesFromTextContent(textContent);
+                allPagesText.push(lines);
+            }
+            return allPagesText;
+        }
+
+        function extractLinesFromTextContent(textContent) {
+            const linesByY = {};
+            textContent.items.forEach(item => {
+                const y = Math.round(item.transform[5]);
+                if (!linesByY[y]) linesByY[y] = [];
+                linesByY[y].push(item.str);
+            });
+
+            const sortedY = Object.keys(linesByY).sort((a, b) => b - a);
+            const lines = [];
+            sortedY.forEach(y => {
+                const lineText = linesByY[y].join(' ').replace(/\s+/g, ' ').trim();
+                if (lineText) lines.push(lineText);
+            });
+            return lines;
+        }
+
+        function parseFlightData(pages) {
+            const flights = {};
+            let year = null;
+            let month = null;
+
+            for (const page of pages) {
+                const lines = page;
+
+                for (const s of lines) {
+                    if (!year) {
+                        const match = s.match(yearFilter);
+                        if (match) {
+                            year = match[1];
+                        }
+                    }
+
+                    if (!month) {
+                        const match = s.match(monthFilter);
+                        if (match) {
+                            month = match[1];
+                        }
+                    }
+
+                    const rowMatch = s.match(rowFilter);
+
+                    if (rowMatch) {
+                        if (!year || !month) {
+                            showMessage('Fehler: Jahr oder Monat wurde nicht im PDF-Header gefunden. Die Extraktion wird abgebrochen.', 'error');
+                            return {};
+                        }
+
+                        try {
+                            const day = s.match(dayFilter)?.[1] || '';
+                            const registration = s.match(registrationFilter)?.[1] || '';
+                            const flightnum = s.match(flightNumberFilter)?.[1] || '';
+                            const isSim = s.match(simFilter) ? '1' : '';
+                            let aircraftModel = s.match(modelFilter)?.[1] || '';
+
+                            const fromAirportRaw = s.match(fromFilter)?.[1] || '';
+                            const toAirportRaw = s.match(toFilter)?.[1] || '';
+
+                            const fromAirport = toIATA(fromAirportRaw);
+                            const toAirport = toIATA(toAirportRaw);
+
+                            const departedTime = s.match(departedFilter)?.[1] || '';
+                            const arrivedTime = s.match(arrivedFilter)?.[1] || '';
+                            const totalTime = getTotal(departedTime, arrivedTime);
+                            let isDayLanding = s.match(landedFilter) ? '1' : '';
+                            let isNightLanding = '';
+
+                            let crewname = '';
+                            const pkMatch = s.match(PKFilter);
+                            if (pkMatch) {
+                                const pk = pkMatch[1];
+                                crewname = PKs[pk] || pk;
+                            }
+
+                            // Determine whether landing is actually at night using sun times
+                            try {
+                                const isNight = isNightLandingJS(year, month, day, arrivedTime, toAirport);
+                                if (isNight) {
+                                    if (isDayLanding === '1') {
+                                        isDayLanding = '';
+                                        isNightLanding = '1';
+                                    } else {
+                                        isNightLanding = '1';
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Night-landing detection failed for', year, month, day, arrivedTime, toAirport, e);
+                            }
+
+                            let remarks = '';
+                            if (isSim === '1') {
+                                remarks = `${aircraftModel} in ${fromAirport}`;
+                                aircraftModel = registration;
+                            }
+
+                            const rowData = [
+                                `${year}-${month}-${day}`, // 0 Date (yyyy-mm-dd)
+                                flightnum,                  // 1 Flight #
+                                registration,               // 2 Aircraft
+                                aircraftModel,              // 3 Aircraft Model
+                                `${fromAirport} (IATA)`,    // 4 From
+                                `${toAirport} (IATA)`,      // 5 To
+                                departedTime,               // 6 Departed (zulu)
+                                arrivedTime,                // 7 Arrived (zulu)
+                                totalTime,                  // 8 Total (hh:mm)
+                                isDayLanding,               // 9 Landings (day)
+                                isNightLanding,             // 10 Landings (night)
+                                crewname,                   // 11 Captain (crew)
+                                isSim,                      // 12 Simulator (1 or empty)
+                                remarks                     // 13 Remarks
+                            ];
+
+                            const uniqueKey = `${year}${month}${day}${departedTime}`;
+                            flights[uniqueKey] = rowData;
+
+                        } catch (e) {
+                            console.error('Fehler beim Parsen der Zeile:', s, e);
+                            showMessage(`Fehler beim Parsen einer Zeile: ${s.substring(0, 50)}...`, 'error');
+                        }
+                    }
+                }
+            }
+
+            const sortedKeys = Object.keys(flights).sort();
+            const sortedFlights = {};
+            sortedKeys.forEach(key => {
+                sortedFlights[key] = flights[key];
+            });
+
+            return sortedFlights;
+        }
+
+        // --- 5. UI INTERACTION & RENDERING ---
+
+        const pdfFile = document.getElementById('pdfFile');
+        const tableContainer = document.getElementById('tableContainer');
+        const tableHeader = document.getElementById('tableHeader');
+        const tableBody = document.getElementById('tableBody');
+        const downloadBtn = document.getElementById('downloadBtn');
+        
+        // Log messages array
+        let logMessages = [];
+        logMessages.push(`Session started at ${new Date().toISOString()}`);
+        
+        // Fügt einen Event-Listener auf den gesamten Tabellenkörper hinzu.
+        // Jede Änderung in einer editierbaren Zelle löst diesen Event aus.
+        // (Keine automatische CSV-Aktualisierung mehr, da Textarea entfernt)
+
+        // Attempt to load CSV files `airports.csv` and `PKs.csv` from same directory as the HTML.
+        // This requires the HTML to be served by a local HTTP server (or permissive environment).
+        async function fetchCSV(path, asText = true) {
+            try {
+                const resp = await fetch(path);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return asText ? await resp.text() : await resp.arrayBuffer();
+            } catch (e) {
+                console.warn('fetchCSV failed for', path, e);
+                return null;
+            }
+        }
+
+        // Decrypt AES-encrypted base64 text using CryptoJS (compatible with OpenSSL -base64)
+        function decryptAES(encryptedText, password) {
+            try {
+                const bytes = CryptoJS.AES.decrypt(encryptedText.trim(), password);
+                const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+                if (!decrypted) {
+                    throw new Error('Decryption resulted in empty string');
+                }
+                return decrypted;
+            } catch (e) {
+                console.error('Decryption failed', e);
+                return null;
+            }
+        }
+
+        // Load PKs on button click
+        async function loadPKs() {
+            const pksPassword = document.getElementById('pksPassword').value.trim();
+            if (!pksPassword) {
+                showMessage('Bitte geben Sie ein Passwort ein.', 'error');
+                return;
+            }
+
+            const pksTxt = await fetchCSV('PKs.csv.enc', true) || await fetchCSV('pks.csv.enc', true);
+            if (pksTxt) {
+                try {
+                    const decrypted = decryptAES(pksTxt, pksPassword);
+                    if (decrypted) {
+                        const parsed = parsePKCSV(decrypted);
+                        PKs = { ...PKs, ...parsed };
+                        showMessage(`PKs entschlüsselt und geladen: ${Object.keys(parsed).length} Einträge`, 'success');
+                        console.log('Loaded PKs:', Object.keys(parsed).slice(0,40));
+                    } else {
+                        showMessage('PKs Passwort falsch oder Datei beschädigt.', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error parsing/decrypting PKs CSV', e);
+                    showMessage('Fehler beim Laden der PKs.', 'error');
+                }
+            } else {
+                showMessage('PKs.csv nicht gefunden.', 'error');
+            }
+        }
+
+        (async function loadLocalCSVs() {
+            logMessages.push(`${new Date().toISOString()} [INFO]: Starting to load local CSVs`);
+            // airports.csv (lowercase) and PKs.csv (case-sensitive on some OS)
+            const airportsTxt = await fetchCSV('airports.csv');
+            if (airportsTxt) {
+                try {
+                    const parsed = parseAirportCSV(airportsTxt);
+                    Airports = { ...Airports, ...parsed };
+                    showMessage(`Airports geladen: ${Object.keys(parsed).length} Einträge`, 'success');
+                    logMessages.push(`${new Date().toISOString()} [INFO]: Loaded ${Object.keys(parsed).length} airports`);
+                } catch (e) {
+                    console.error('Error parsing airports.csv', e);
+                    logMessages.push(`${new Date().toISOString()} [ERROR]: Error parsing airports.csv: ${e.message}`);
+                }
+            } else {
+                logMessages.push(`${new Date().toISOString()} [WARN]: airports.csv not found`);
+            }
+
+            // PKs are now loaded via button click
+        })();
+
+
+        pdfFile.addEventListener('change', async (event) => {
+            const files = Array.from(event.target.files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+            if (files.length === 0) return;
+
+            showMessage(`Verarbeite ${files.length} PDF-Datei(en)...`, 'info');
+            tableBody.innerHTML = '';
+            tableContainer.classList.add('hidden');
+            downloadBtn.disabled = true;
+
+            let allFlights = [];
+            let totalFlights = 0;
+
+            try {
+                for (const file of files) {
+                    logMessages.push(`${new Date().toISOString()} [INFO]: Processing file ${file.name}`);
+                    showMessage(`Verarbeite ${file.name}...`, 'info');
+                    
+                    // 1. Extract Text
+                    const pagesText = await getPdfText(file);
+                    
+                    // 2. Parse Data
+                    const flights = parseFlightData(pagesText);
+                    const flightArray = Object.values(flights);
+                    
+                    allFlights = allFlights.concat(flightArray);
+                    totalFlights += flightArray.length;
+                    logMessages.push(`${new Date().toISOString()} [INFO]: Extracted ${flightArray.length} flights from ${file.name}`);
+                }
+
+                if (allFlights.length === 0) {
+                    showMessage('Es konnten keine gültigen Flüge in den PDFs gefunden werden. Überprüfen Sie das Dateiformat und die Regex-Filter.', 'error');
+                    logMessages.push(`${new Date().toISOString()} [ERROR]: No valid flights found in any PDF`);
+                    return;
+                }
+
+                // Sortiere nach Datum
+                allFlights.sort((a, b) => a[0].localeCompare(b[0]));
+                logMessages.push(`${new Date().toISOString()} [INFO]: Sorted ${allFlights.length} flights by date`);
+
+                // 3. Render Table
+                renderTable(allFlights);
+
+                showMessage(`Erfolgreich ${totalFlights} Flüge aus ${files.length} PDF(s) extrahiert.`, 'success');
+                downloadBtn.disabled = false;
+                tableContainer.classList.remove('hidden');
+
+            } catch (e) {
+                console.error('Fataler Verarbeitungsfehler:', e);
+                logMessages.push(`${new Date().toISOString()} [ERROR]: Fatal processing error: ${e.message}`);
+                showMessage(`Ein fataler Fehler ist aufgetreten: ${e.message}. Konsole prüfen für Details.`, 'error');
+            }
+        });        /**
+         * Renders the flight data in an editable HTML table.
+         * @param {Array<Array<string>>} flightData - The parsed flight data.
+         */
+        function renderTable(flightData) {
+            // Render Header
+            tableHeader.innerHTML = '';
+            HEADER.forEach(h => {
+                const th = document.createElement('th');
+                th.className = 'px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap';
+                th.innerText = h;
+                tableHeader.appendChild(th);
+            });
+
+            // Render Body
+            tableBody.innerHTML = '';
+            flightData.forEach((rowData) => {
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-gray-50 transition duration-100';
+
+                rowData.forEach((cellData, colIndex) => {
+                    const td = document.createElement('td');
+                    td.className = 'table-cell-editable text-sm text-gray-800';
+                    td.innerText = cellData;
+
+                    // Make cells editable, except for the calculated Total time (Col 8)
+                    if (colIndex !== 8) {
+                        td.contentEditable = 'true';
+                    }
+
+                    tr.appendChild(td);
+                });
+                tableBody.appendChild(tr);
+            });
+        }
+        
+        /**
+         * Triggers the download of the generated CSV file.
+         */
+        function downloadCSV() {
+            // Generiere CSV aus der aktuellen Tabelle
+            const rows = Array.from(tableBody.querySelectorAll('tr'));
+            let csv = HEADER.join(',') + '\n';
+
+            rows.forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const rowData = cells.map((cell, index) => {
+                    
+                    // 1. Total (hh:mm) muss NEU berechnet werden, falls Departed/Arrived geändert wurden
+                    if (index === 8) { 
+                        const departedTime = cells[6].innerText.trim();
+                        const arrivedTime = cells[7].innerText.trim();
+                        return getTotal(departedTime, arrivedTime);
+                    }
+                    
+                    // 2. CSV Sanitizing für alle anderen Zellen
+                    let data = cell.innerText.trim();
+                    data = data.replace(/"/g, '""'); // Escape double quotes
+                    if (data.includes(',') || data.includes('\n')) {
+                        data = `"${data}"`; // Enclose if data contains comma or newline
+                    }
+                    
+                    return data;
+                });
+                csv += rowData.join(',') + '\n';
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+
+            // Create filename based on current date
+            const date = new Date().toISOString().slice(0, 10);
+            link.setAttribute('href', url);
+            link.setAttribute('download', `fluglog_${date}.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showMessage('CSV-Datei erfolgreich heruntergeladen!', 'success');
+        }
+
+        /**
+         * Triggers the download of the log file.
+         */
+        function downloadLog() {
+            logMessages.push(`${new Date().toISOString()} [INFO]: Log file download requested`);
+            const logContent = logMessages.join('\n');
+            const blob = new Blob([logContent], { type: 'text/plain;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+
+            const date = new Date().toISOString().slice(0, 10);
+            link.setAttribute('href', url);
+            link.setAttribute('download', `fluglog_log_${date}.txt`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showMessage('Log-Datei erfolgreich heruntergeladen!', 'success');
+        }
+    </script>
+
+</body>
+</html>
