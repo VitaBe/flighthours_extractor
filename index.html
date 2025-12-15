@@ -449,9 +449,15 @@ function isNightLandingJS(year, month, day, arrivedTime, iataCode) {
                     const decrypted = decryptAES(pksTxt, pksPassword);
                     if (decrypted) {
                         const parsed = parsePKCSV(decrypted);
-                        PKs = { ...PKs, ...parsed };
-                        showMessage(`PKs entschlüsselt und geladen: ${Object.keys(parsed).length} Einträge`, 'success');
-                        console.log('Loaded PKs:', Object.keys(parsed).slice(0,40));
+                            PKs = { ...PKs, ...parsed };
+                            showMessage(`PKs entschlüsselt und geladen: ${Object.keys(parsed).length} Einträge`, 'success');
+                            console.log('Loaded PKs:', Object.keys(parsed).slice(0,40));
+                            // Wenn bereits eine Tabelle gerendert ist, wende die geladenen PKs an
+                            try {
+                                applyPKsToTable();
+                            } catch (e) {
+                                console.error('applyPKsToTable failed', e);
+                            }
                     } else {
                         showMessage('PKs Passwort falsch oder Datei beschädigt.', 'error');
                     }
@@ -573,6 +579,47 @@ function isNightLandingJS(year, month, day, arrivedTime, iataCode) {
             });
         }
         
+        /**
+         * Apply loaded PKs to an already-rendered table.
+         * Replaces PK codes in the Captain column (index 11) with the corresponding names from `PKs`.
+         */
+        function applyPKsToTable() {
+            if (!tableBody) return;
+            const rows = Array.from(tableBody.querySelectorAll('tr'));
+            let replaced = 0;
+
+            rows.forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const captainCell = cells[11];
+                if (!captainCell) return;
+                const text = captainCell.innerText.trim();
+                if (!text) return;
+
+                // Direct key match
+                if (PKs[text]) {
+                    captainCell.innerText = PKs[text];
+                    replaced++;
+                    return;
+                }
+
+                // If the cell contains the PK as part of a larger string, replace the PK substring
+                for (const key in PKs) {
+                    if (!Object.prototype.hasOwnProperty.call(PKs, key)) continue;
+                    if (text.includes(key)) {
+                        captainCell.innerText = text.replace(key, PKs[key]);
+                        replaced++;
+                        break;
+                    }
+                }
+            });
+
+            if (replaced > 0) {
+                showMessage(`PKs übersetzt: ${replaced} Ersetzungen in der Tabelle.`, 'success');
+                logMessages.push(`${new Date().toISOString()} [INFO]: Applied ${replaced} PK replacements to table`);
+            } else {
+                showMessage('PKs geladen - keine Übersetzung in der aktuellen Tabelle.', 'info');
+            }
+        }
         /**
          * Triggers the download of the generated CSV file.
          */
