@@ -658,7 +658,7 @@ function isNightLandingJS(year, month, day, arrivedTime, iataCode) {
             // Create filename based on current date
             const date = new Date().toISOString().slice(0, 10);
             link.setAttribute('href', url);
-            link.setAttribute('download', `fluglog_${date}.csv`);
+            link.setAttribute('download', `flights_${date}.csv`);
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
@@ -679,7 +679,7 @@ function isNightLandingJS(year, month, day, arrivedTime, iataCode) {
 
             const date = new Date().toISOString().slice(0, 10);
             link.setAttribute('href', url);
-            link.setAttribute('download', `fluglog_log_${date}.txt`);
+            link.setAttribute('download', `logfile_${date}.txt`);
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
