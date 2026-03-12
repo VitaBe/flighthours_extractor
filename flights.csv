@@ -1,0 +1,5 @@
+Date (yyyy-mm-dd),Flight #,Aircraft,Aircraft Model,From,To,Departed (zulu),Arrived (zulu),Total (hh:mm),Landings (day),Landings (night),Captain (crew),Simulator,Remarks
+2026-01-12,DE2368,DANRB,A330,FRA (IATA),HKT (IATA),14:26,01:47,11:21,,,370133E,,
+2026-01-14,DE2369,DANRG,A330,HKT (IATA),FRA (IATA),03:18,16:14,12:56,,,370133E,,
+2026-01-19,DE2236,DANRB,A330,FRA (IATA),PTY (IATA),09:52,21:12,11:20,1,,370038A,,
+2026-01-23,DE2237,DANRL,A330,PTY (IATA),FRA (IATA),00:14,11:04,10:50,1,,370038A,,

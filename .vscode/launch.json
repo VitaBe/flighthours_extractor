@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch (Local)",
+            "type": "chrome",
+            "request": "launch",
+            "file": "/Users/vitalibelous/src/flighthours_extractor/index.html"
+        },
+        {
+            "type": "chrome",
+            "request": "launch",
+            "name": "Launch (Server)",
+            "url": "http://localhost:8000/index.html",  // Adjust filename if needed
+            "webRoot": "${workspaceFolder}",
+            "runtimeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  // Add this line
+            "sourceMapPathOverrides": {
+                "webpack:///src/*": "${webRoot}/*"
+            }
+        }
+    ]
+}

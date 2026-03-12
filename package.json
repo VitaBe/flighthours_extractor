@@ -1,0 +1,14 @@
+{
+  "name": "flighthours-extractor",
+  "version": "1.0.0",
+  "description": "Extract flight data from Flugstunden PDFs",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node cli.js test/Flugstunden_Januar.pdf -v"
+  },
+  "dependencies": {
+    "canvas": "^3.2.1",
+    "pdfjs-dist": "^3.11.174"
+  }
+}
